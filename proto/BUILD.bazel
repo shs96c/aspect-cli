@@ -1,0 +1,14 @@
+load("@io_bazel_rules_go//proto:compiler.bzl", "go_proto_compiler")
+load(
+    "@io_bazel_rules_go//proto/wkt:well_known_types.bzl",
+    "PROTO_RUNTIME_DEPS",
+    "WELL_KNOWN_TYPES_APIV2",
+)
+
+# go_proto is a copy of https://github.com/bazelbuild/rules_go/blob/2e339e9d/proto/BUILD.bazel#L21
+# without the WELL_KNOWN_TYPE_RULES.
+go_proto_compiler(
+    name = "go_proto",
+    visibility = ["//:__subpackages__"],
+    deps = PROTO_RUNTIME_DEPS + WELL_KNOWN_TYPES_APIV2,
+)

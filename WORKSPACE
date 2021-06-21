@@ -11,6 +11,22 @@ http_archive(
     ],
 )
 
+# Branch: master
+# Commit: f7a30f6f80006b591fa7c437fe5a951eb10bcbcf
+# Date: 2021-02-09 14:25:06 +0000 UTC
+# URL: https://github.com/bazelbuild/rules_proto/commit/f7a30f6f80006b591fa7c437fe5a951eb10bcbcf
+#
+# Merge pull request #77 from Yannic/proto_descriptor_set_rule
+#
+# Create proto_descriptor_set
+# Size: 14397 (14 kB)
+http_archive(
+    name = "rules_proto",
+    sha256 = "9fc210a34f0f9e7cc31598d109b5d069ef44911a82f507d5a88716db171615a8",
+    strip_prefix = "rules_proto-f7a30f6f80006b591fa7c437fe5a951eb10bcbcf",
+    urls = ["https://github.com/bazelbuild/rules_proto/archive/f7a30f6f80006b591fa7c437fe5a951eb10bcbcf.tar.gz"],
+)
+
 http_archive(
     name = "bazel_gazelle",
     sha256 = "62ca106be173579c0a167deb23358fdfe71ffa1e4cfdddf5582af26520f1c66f",
@@ -19,6 +35,14 @@ http_archive(
         "https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.23.0/bazel-gazelle-v0.23.0.tar.gz",
     ],
 )
+
+########### Protobuf dependencies #######
+
+load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_proto_toolchains")
+
+rules_proto_dependencies()
+
+rules_proto_toolchains()
 
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
 load("@io_bazel_rules_go//go:deps.bzl", "go_register_toolchains", "go_rules_dependencies")

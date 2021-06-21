@@ -1,0 +1,26 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+# gazelle:exclude doc.go
+
+proto_library(
+    name = "blaze_query_proto",
+    srcs = ["build.proto"],
+    visibility = ["//visibility:public"],
+)
+
+go_proto_library(
+    name = "blaze_query_go_proto",
+    compiler = "//proto:go_proto",
+    importpath = "aspect.build/cli/proto/blaze_query",
+    proto = ":blaze_query_proto",
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "blaze_query",
+    embed = [":blaze_query_go_proto"],
+    importpath = "aspect.build/cli/proto/blaze_query",
+    visibility = ["//visibility:public"],
+)

@@ -3,6 +3,11 @@ load("@bazel_gazelle//:def.bzl", "gazelle")
 # TODO: follow https://sagikazarmark.hu/blog/vanity-import-paths-in-go/
 # so we have savvy go imports for users
 # gazelle:prefix aspect.build/cli
+#
+# Gazelle should auto-detect the desired naming convention as per docs but
+# it doesn't hurt to be explicit about it
+# gazelle:go_naming_convention import
+# gazelle:go_naming_convention_external import
 gazelle(name = "gazelle")
 
 gazelle(

@@ -26,9 +26,9 @@ func LocateBazel() string {
 	panic("Unable to locate bazel tool to wrap. Looked in $BAZEL_REAL, $PATH")
 }
 
-func Spawn(command string) {
+func Spawn(command string, args ...string) {
 	bazel := LocateBazel()
-	cmd := exec.Command(bazel, command)
+	cmd := exec.Command(bazel, append([]string{command}, args...)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Fatal(err)
@@ -50,4 +50,20 @@ func Spawn(command string) {
 	if err := cmd.Wait(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func CaptureStdout(command string, args ...string) io.ReadCloser {
+	bazel := LocateBazel()
+
+	cmd := exec.Command(bazel, append([]string{command}, args...)...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		log.Fatal(err)
+	}
+
+	return stdout
 }
