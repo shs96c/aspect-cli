@@ -1,0 +1,29 @@
+Aspect CLI
+==========
+
+Aspect CLI is a super-charged replacement for the Bazel CLI.
+
+> Note: this documentation is also hosted at https://docs.aspect.dev/aspect-cli
+
+High-level features:
+
+- Fully compatible drop-in replacement for calling `bazel`.
+
+- All the developer experience polish we can manage.
+  The power of Bazel without the steep learning curve.
+
+- Includes [bazelisk] so the version of the Bazel server is the same across
+  developers and your CI.
+
+- Plugin system allows extension by third-parties or your company.
+  Plugins can do things like repair problems reported as errors,
+  add new commands like `lint`, and much more.
+
+  For more information about writing a plugin, run `aspect help plugins`.
+
+[bazelisk]: https://github.com/bazelbuild/bazelisk
+
+## Installation
+
+Download a binary for your platform from https://github.com/aspect-dev/aspect-cli/releases
+then rename to `aspect` and move it into your `PATH`.

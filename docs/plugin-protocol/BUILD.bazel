@@ -1,0 +1,24 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+go_library(
+    name = "plugin-protocol",
+    embed = [":aspectplugin0_go_proto"],
+    importpath = "aspect.build/cli/docs/plugin-protocol",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "aspectplugin0_proto",
+    srcs = ["aspectplugin0.1.proto"],
+    visibility = ["//visibility:public"],
+)
+
+go_proto_library(
+    name = "aspectplugin0_go_proto",
+    compilers = ["@io_bazel_rules_go//proto:go_grpc"],
+    importpath = "aspect.build/cli/docs/plugin-protocol",
+    proto = ":aspectplugin0_proto",
+    visibility = ["//visibility:public"],
+)

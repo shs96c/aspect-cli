@@ -1,0 +1,37 @@
+// Aspect CLI Plugin RPC protocol version 0.1
+//
+// This file defines version 0.1 of the RPC protocol.
+// To implement a plugin against this protocol, you could copy this file
+// into your own codebase and use protoc to generate stubs for your target language.
+// Alternatively, use the aspect CLI plugin template:
+// https://github.com/aspect-dev/aspect-cli-plugin-example
+//
+// This file will not be updated. Any minor versions of protocol 0 to follow
+// should copy this file and modify the copy while maintaing backwards
+// compatibility. Breaking changes, if any are required, will come
+// in a subsequent major version with its own separate proto definition.
+//
+// Note that only the proto files included in a release tag of Aspect CLI are
+// official protocol releases. Proto files taken from other commits may include
+// incomplete changes or features that did not make it into a final release.
+// In all reasonable cases, plugin developers should take the proto file from
+// the tag of the most recent release of Aspect CLI, and not from the main
+// branch or any other development branch.
+//
+syntax = "proto3";
+option go_package = "aspect.build/cli/pkg/plugin-protocol"
+
+package aspectplugin0;
+
+message Stop {
+    message Request {
+    }
+    message Response {
+                string Error = 1;
+    }
+}
+
+service Plugin {
+    //////// Graceful Shutdown
+    rpc Stop(Stop.Request) returns (Stop.Response);
+}

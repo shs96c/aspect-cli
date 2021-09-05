@@ -21,7 +21,6 @@ import (
 )
 
 var (
-	boldCyan = color.New(color.FgCyan, color.Bold)
 	faint = color.New(color.Faint)
 )
 
@@ -34,7 +33,7 @@ func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command
 	cmd := &cobra.Command{
 		Use:   "aspect",
 		Short: "Aspect.build bazel wrapper",
-		Long:  boldCyan.Sprintf(`Aspect CLI`) + ` is a better frontend for running bazel`,
+		Long:  topics.Read("aspect"),
 	}
 
 	// ### Flags
@@ -70,6 +69,11 @@ func NewRootCmd(streams ioutils.Streams, defaultInteractive bool) *cobra.Command
 		Use:   "target-syntax",
 		Short: "Documentation on Bazel's syntax for targets",
 		Long:  topics.Read("target-syntax"),
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "plugins",
+		Short: "How to extend the Aspect CLI",
+		Long:  topics.Read("plugins"),
 	})
 
 	return cmd
