@@ -6,7 +6,10 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 gomock(
     name = "mock_system_source",
     out = "mock_system_test.go",
-    interfaces = ["PluginSystem"],
+    interfaces = [
+        "ClientProvider",
+        "PluginSystem",
+    ],
     library = "//pkg/plugin/system",
     package = "mock",
     visibility = ["//visibility:private"],

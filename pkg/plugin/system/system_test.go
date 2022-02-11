@@ -20,6 +20,7 @@ import (
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/ioutils"
 	plugin_mock "aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin/mock"
+	system_mock "aspect.build/cli/pkg/plugin/system/mock"
 )
 
 func createInterceptorCommand() *cobra.Command {
@@ -47,7 +48,10 @@ func TestPluginSystemInterceptors(t *testing.T) {
 
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(plugin)
+		ps.addPlugin(&InternalPlugin{
+			plugin: plugin,
+			client: system_mock.NewMockClientProvider(ctrl),
+		})
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -87,8 +91,14 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin1 := plugin_mock.NewMockPlugin(ctrl)
 		plugin2 := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(plugin1)
-		ps.addPlugin(plugin2)
+		ps.addPlugin(&InternalPlugin{
+			plugin: plugin1,
+			client: system_mock.NewMockClientProvider(ctrl),
+		})
+		ps.addPlugin(&InternalPlugin{
+			plugin: plugin2,
+			client: system_mock.NewMockClientProvider(ctrl),
+		})
 
 		// Expect the callbacks in reverse-order of execution, plugins in order added
 		gomock.InOrder(
@@ -125,7 +135,10 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		// Plugin to be invoked
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(plugin)
+		ps.addPlugin(&InternalPlugin{
+			plugin: plugin,
+			client: system_mock.NewMockClientProvider(ctrl),
+		})
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -165,7 +178,10 @@ func TestPluginSystemInterceptors(t *testing.T) {
 		// Plugin to be invoked
 		ps := NewPluginSystem().(*pluginSystem)
 		plugin := plugin_mock.NewMockPlugin(ctrl)
-		ps.addPlugin(plugin)
+		ps.addPlugin(&InternalPlugin{
+			plugin: plugin,
+			client: system_mock.NewMockClientProvider(ctrl),
+		})
 
 		// Expect the callbacks in reverse-order of execution
 		gomock.InOrder(
@@ -242,7 +258,10 @@ func TestPluginSystemInterceptors(t *testing.T) {
 			) error {
 				return fmt.Errorf("plugin error")
 			})
-		ps.addPlugin(plugin)
+		ps.addPlugin(&InternalPlugin{
+			plugin: plugin,
+			client: system_mock.NewMockClientProvider(ctrl),
+		})
 
 		// Hook interceptors
 		runInterceptor := ps.RunHooksInterceptor(streams)

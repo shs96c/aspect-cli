@@ -42,7 +42,6 @@ type pluginSystem struct {
 	finder        Finder
 	parser        Parser
 	clientFactory ClientFactory
-	clients       []ClientProvider
 	plugins       *PluginList
 	promptRunner  ioutils.PromptRunner
 }
@@ -70,7 +69,6 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 		return fmt.Errorf("failed to configure plugin system: %w", err)
 	}
 
-	ps.clients = make([]ClientProvider, 0, len(aspectplugins))
 	for _, aspectplugin := range aspectplugins {
 		logLevel := hclog.LevelFromString(aspectplugin.LogLevel)
 		if logLevel == hclog.NoLevel {
@@ -91,41 +89,34 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			SyncStderr:       streams.Stderr,
 			Logger:           pluginLogger,
 		}
-		client := ps.clientFactory.New(clientConfig)
-		ps.clients = append(ps.clients, client)
 
-		rpcClient, err := client.Client()
-		if err != nil {
-			return fmt.Errorf("failed to configure plugin system: %w", err)
-		}
-
-		rawplugin, err := rpcClient.Dispense(config.DefaultPluginName)
+		internalPlugin, err := ps.clientFactory.New(clientConfig)
 		if err != nil {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
 		propertiesBytes := aspectplugin.propertiesBytes
 
-		aspectplugin := rawplugin.(plugin.Plugin)
+		aspectplugin := internalPlugin.plugin
 		if err := aspectplugin.Setup(propertiesBytes); err != nil {
 			return fmt.Errorf("failed to setup plugin: %w", err)
 		}
 
-		ps.addPlugin(aspectplugin)
+		ps.addPlugin(internalPlugin)
 	}
 
 	return nil
 }
 
-func (ps *pluginSystem) addPlugin(plugin plugin.Plugin) {
+func (ps *pluginSystem) addPlugin(plugin *InternalPlugin) {
 	ps.plugins.insert(plugin)
 }
 
 // TearDown tears down the plugin system, making all the necessary actions to
 // clean up the system.
 func (ps *pluginSystem) TearDown() {
-	for _, client := range ps.clients {
-		client.Kill()
+	for node := ps.plugins.head; node != nil; node = node.next {
+		node.plugin.client.Kill()
 	}
 }
 
@@ -143,7 +134,7 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 		besBackend := bep.NewBESBackend()
 		for node := ps.plugins.head; node != nil; node = node.next {
-			besBackend.RegisterSubscriber(node.plugin.BEPEventCallback)
+			besBackend.RegisterSubscriber(node.plugin.plugin.BEPEventCallback)
 		}
 		if err := besBackend.Setup(); err != nil {
 			return fmt.Errorf("failed to run BES backend: %w", err)
@@ -207,16 +198,35 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 	}
 }
 
-// ClientFactory hides the call to goplugin.NewClient.
+// ClientFactory hides the call to goplugin.NewClient() and conversion to InternalPlugin.
 type ClientFactory interface {
-	New(*goplugin.ClientConfig) ClientProvider
+	New(*goplugin.ClientConfig) (*InternalPlugin, error)
 }
 
 type clientFactory struct{}
 
 // New calls the goplugin.NewClient with the given config.
-func (*clientFactory) New(config *goplugin.ClientConfig) ClientProvider {
-	return goplugin.NewClient(config)
+func (*clientFactory) New(clientConfig *goplugin.ClientConfig) (*InternalPlugin, error) {
+	var internalPlugin *InternalPlugin
+
+	client := goplugin.NewClient(clientConfig)
+
+	rpcClient, err := client.Client()
+	if err != nil {
+		return internalPlugin, err
+	}
+
+	rawplugin, err := rpcClient.Dispense(config.DefaultPluginName)
+	if err != nil {
+		return internalPlugin, err
+	}
+
+	internalPlugin = &InternalPlugin{
+		plugin: rawplugin.(plugin.Plugin),
+		client: client,
+	}
+
+	return internalPlugin, nil
 }
 
 // ClientProvider is an interface for goplugin.Client returned by
@@ -226,6 +236,11 @@ type ClientProvider interface {
 	Kill()
 }
 
+type InternalPlugin struct {
+	plugin plugin.Plugin
+	client ClientProvider
+}
+
 // PluginList implements a simple linked list for the parsed plugins from the
 // plugins file.
 type PluginList struct {
@@ -233,7 +248,7 @@ type PluginList struct {
 	tail *PluginNode
 }
 
-func (l *PluginList) insert(p plugin.Plugin) {
+func (l *PluginList) insert(p *InternalPlugin) {
 	node := &PluginNode{plugin: p}
 	if l.head == nil {
 		l.head = node
@@ -246,5 +261,5 @@ func (l *PluginList) insert(p plugin.Plugin) {
 // PluginNode is a node in the PluginList linked list.
 type PluginNode struct {
 	next   *PluginNode
-	plugin plugin.Plugin
+	plugin *InternalPlugin
 }
