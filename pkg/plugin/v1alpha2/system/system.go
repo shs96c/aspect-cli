@@ -17,13 +17,15 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	goplugin "github.com/hashicorp/go-plugin"
 	"github.com/spf13/cobra"
+	yaml "gopkg.in/yaml.v2"
 
 	rootFlags "aspect.build/cli/pkg/aspect/root/flags"
 	"aspect.build/cli/pkg/aspecterrors"
 	"aspect.build/cli/pkg/interceptors"
 	"aspect.build/cli/pkg/ioutils"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
-	"aspect.build/cli/pkg/plugin/sdk/v1alpha2/plugin"
+	"aspect.build/cli/pkg/plugin/client"
+	"aspect.build/cli/pkg/plugin/config"
+	sdk_config "aspect.build/cli/pkg/plugin/sdk/v1alpha2/config"
 	"aspect.build/cli/pkg/plugin/system/bep"
 )
 
@@ -39,9 +41,9 @@ type PluginSystem interface {
 }
 
 type pluginSystem struct {
-	finder        Finder
-	parser        Parser
-	clientFactory ClientFactory
+	finder        config.Finder
+	parser        config.Parser
+	clientFactory client.Factory
 	plugins       *PluginList
 	promptRunner  ioutils.PromptRunner
 }
@@ -50,9 +52,9 @@ type pluginSystem struct {
 // PluginSystem interface.
 func NewPluginSystem() PluginSystem {
 	return &pluginSystem{
-		finder:        NewFinder(),
-		parser:        NewParser(),
-		clientFactory: &clientFactory{},
+		finder:        config.NewFinder(),
+		parser:        config.NewParser(),
+		clientFactory: client.NewFactory(),
 		plugins:       &PluginList{},
 		promptRunner:  ioutils.NewPromptRunner(),
 	}
@@ -81,8 +83,8 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 		// TODO(f0rmiga): make this loop concurrent so that all plugins are
 		// configured faster.
 		clientConfig := &goplugin.ClientConfig{
-			HandshakeConfig:  config.Handshake,
-			Plugins:          config.PluginMap,
+			HandshakeConfig:  sdk_config.Handshake,
+			Plugins:          sdk_config.PluginMap,
 			Cmd:              exec.Command(aspectplugin.From),
 			AllowedProtocols: []goplugin.Protocol{goplugin.ProtocolGRPC},
 			SyncStdout:       streams.Stdout,
@@ -95,11 +97,13 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
-		propertiesBytes := aspectplugin.propertiesBytes
+		propertiesBytes, err := yaml.Marshal(aspectplugin.Properties)
+		if err != nil {
+			return fmt.Errorf("failed to configure plugin system: %w", err)
+		}
 
-		aspectplugin := internalPlugin.plugin
-		if err := aspectplugin.Setup(propertiesBytes); err != nil {
-			return fmt.Errorf("failed to setup plugin: %w", err)
+		if err := internalPlugin.Plugin.Setup(propertiesBytes); err != nil {
+			return fmt.Errorf("failed to configure plugin system: %w", err)
 		}
 
 		ps.addPlugin(internalPlugin)
@@ -108,7 +112,7 @@ func (ps *pluginSystem) Configure(streams ioutils.Streams) error {
 	return nil
 }
 
-func (ps *pluginSystem) addPlugin(plugin *InternalPlugin) {
+func (ps *pluginSystem) addPlugin(plugin *client.InternalPlugin) {
 	ps.plugins.insert(plugin)
 }
 
@@ -116,7 +120,7 @@ func (ps *pluginSystem) addPlugin(plugin *InternalPlugin) {
 // clean up the system.
 func (ps *pluginSystem) TearDown() {
 	for node := ps.plugins.head; node != nil; node = node.next {
-		node.plugin.client.Kill()
+		node.plugin.Client.Kill()
 	}
 }
 
@@ -134,7 +138,7 @@ func (ps *pluginSystem) BESBackendInterceptor() interceptors.Interceptor {
 	return func(ctx context.Context, cmd *cobra.Command, args []string, next interceptors.RunEContextFn) error {
 		besBackend := bep.NewBESBackend()
 		for node := ps.plugins.head; node != nil; node = node.next {
-			besBackend.RegisterSubscriber(node.plugin.plugin.BEPEventCallback)
+			besBackend.RegisterSubscriber(node.plugin.Plugin.BEPEventCallback)
 		}
 		if err := besBackend.Setup(); err != nil {
 			return fmt.Errorf("failed to run BES backend: %w", err)
@@ -198,49 +202,6 @@ func (ps *pluginSystem) commandHooksInterceptor(methodName string, streams iouti
 	}
 }
 
-// ClientFactory hides the call to goplugin.NewClient() and conversion to InternalPlugin.
-type ClientFactory interface {
-	New(*goplugin.ClientConfig) (*InternalPlugin, error)
-}
-
-type clientFactory struct{}
-
-// New calls the goplugin.NewClient with the given config.
-func (*clientFactory) New(clientConfig *goplugin.ClientConfig) (*InternalPlugin, error) {
-	var internalPlugin *InternalPlugin
-
-	client := goplugin.NewClient(clientConfig)
-
-	rpcClient, err := client.Client()
-	if err != nil {
-		return internalPlugin, err
-	}
-
-	rawplugin, err := rpcClient.Dispense(config.DefaultPluginName)
-	if err != nil {
-		return internalPlugin, err
-	}
-
-	internalPlugin = &InternalPlugin{
-		plugin: rawplugin.(plugin.Plugin),
-		client: client,
-	}
-
-	return internalPlugin, nil
-}
-
-// ClientProvider is an interface for goplugin.Client returned by
-// goplugin.NewClient.
-type ClientProvider interface {
-	Client() (goplugin.ClientProtocol, error)
-	Kill()
-}
-
-type InternalPlugin struct {
-	plugin plugin.Plugin
-	client ClientProvider
-}
-
 // PluginList implements a simple linked list for the parsed plugins from the
 // plugins file.
 type PluginList struct {
@@ -248,7 +209,7 @@ type PluginList struct {
 	tail *PluginNode
 }
 
-func (l *PluginList) insert(p *InternalPlugin) {
+func (l *PluginList) insert(p *client.InternalPlugin) {
 	node := &PluginNode{plugin: p}
 	if l.head == nil {
 		l.head = node
@@ -261,5 +222,5 @@ func (l *PluginList) insert(p *InternalPlugin) {
 // PluginNode is a node in the PluginList linked list.
 type PluginNode struct {
 	next   *PluginNode
-	plugin *InternalPlugin
+	plugin *client.InternalPlugin
 }

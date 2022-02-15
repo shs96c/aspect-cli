@@ -1,0 +1,12 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "config",
+    srcs = [
+        "finder.go",
+        "parser.go",
+    ],
+    importpath = "aspect.build/cli/pkg/plugin/config",
+    visibility = ["//visibility:public"],
+    deps = ["@in_gopkg_yaml_v2//:yaml_v2"],
+)
