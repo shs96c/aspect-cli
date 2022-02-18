@@ -8,7 +8,7 @@ package clean
 
 import (
 	"bufio"
-	"encoding/base64"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -17,8 +17,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
@@ -55,9 +56,7 @@ implementation can be fixed.
 	rememberLine2 = "Remember this choice and skip the prompt in the future"
 )
 
-var (
-	diskCacheRegex = regexp.MustCompile(`--disk_cache.+?(\/.+?)"`)
-)
+var diskCacheRegex = regexp.MustCompile(`--disk_cache.+?(\/.+?)"`)
 
 type SelectRunner interface {
 	Run() (int, string, error)
@@ -96,14 +95,11 @@ type Clean struct {
 	ExpungeAsync bool
 
 	// reclaimAll
-	bazelDirs       map[string]bazelDirInfo
-	bazelDirsMutex  sync.Mutex
-	deleteMutex     sync.Mutex
-	deleteCounter   int
-	chanErrors      *errorSet
-	errorChannel    chan error
-	deleteChannel   chan string
-	sizeCalcChannel chan bazelDirInfo
+	// bazelDirs       map[string]bazelDirInfo
+	// bazelDirsMutex sync.Mutex
+	// deleteMutex   sync.Mutex
+	deleteCounter int
+	chanErrors    *errorSet
 }
 
 // New creates a Clean command.
@@ -153,7 +149,6 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 	if c.isInteractiveMode && !skip {
 
 		_, chosen, err := c.Behavior.Run()
-
 		if err != nil {
 			return fmt.Errorf("prompt failed: %w", err)
 		}
@@ -205,112 +200,112 @@ func (c *Clean) Run(_ *cobra.Command, _ []string) error {
 }
 
 func (c *Clean) reclaimAll() error {
-	c.bazelDirs = make(map[string]bazelDirInfo)
+	sizeCalcQueue := make(chan bazelDirInfo, 64)
+	confirmationQueue := make(chan bazelDirInfo, 64)
+	deleteQueue := make(chan string, 128)
 
-	c.sizeCalcChannel = make(chan bazelDirInfo, 64)
-	c.deleteChannel = make(chan string, 128)
-	c.errorChannel = make(chan error, 64)
+	g, ctx := errgroup.WithContext(context.Background())
 
-	// threads for calculating sizes of directories
-	for i := 0; i < 5; i++ {
-		go c.directoryProcessor()
+	// Goroutines for calculating sizes of directories.
+	for i := 0; i < 8; i++ {
+		g.Go(func() error {
+			return c.sizeCalculator(ctx, sizeCalcQueue, confirmationQueue)
+		})
 	}
 
-	// threads for deleting directories
-	for i := 0; i < 5; i++ {
-		go c.deleteProcessor()
+	// Goroutine for prompting the user to confirm deletion.
+	g.Go(func() error {
+		return c.confirmationActor(ctx, confirmationQueue, deleteQueue)
+	})
+
+	// Goroutines for deleting directories.
+	for i := 0; i < 8; i++ {
+		g.Go(func() error {
+			return c.deleteProcessor(ctx, deleteQueue)
+		})
 	}
 
-	// thread for processing errors from the other threads
-	go c.errorProcessor()
+	// Goroutine for finding the disk caches.
+	g.Go(func() error {
+		return c.findDiskCaches(ctx, sizeCalcQueue)
+	})
 
-	// will find disk caches and add them to the directoryProcessor queue
-	c.findDiskCaches()
+	// Goroutine for finding the Bazel workspaces.
+	g.Go(func() error {
+		return c.findBazelWorkspaces(ctx, sizeCalcQueue)
+	})
 
-	// will find bazel workspaces and add them to the directoryProcessor queue
-	c.findBazelWorkspaces()
+	// _, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
+	// fmt.Printf("Disk Space Gained: %.2f %s. Exiting...\n", hRSpaceReclaimed, unit)
 
-	// At this point we will know how many workspaces / caches we will need to clean.
-	// What we dont know is the size of those workspaces. While we are waiting for all
-	// of the processing to happen we can start prompting for the ones that have completed.
-	var spaceReclaimed float64
-	for i := 0; i < len(c.bazelDirs); i++ {
-		processedBazelWorkspaceDirectories := c.getProcessedBazelWorkspaceDirectories()
+	close(sizeCalcQueue)
+	close(confirmationQueue)
+	close(deleteQueue)
 
-		// Waiting function. Will only return once there is at least 1 directory that
-		// we can prompt the user about. Will inform the user that we are waiting
-		dir := processedBazelWorkspaceDirectories[0]
-
-		label := fmt.Sprintf("Workspace: %s, Age: %s, Size: %.2f %s. Would you like to remove", dir.workspaceName, dir.accessTime, dir.hRSize, dir.unit)
-		if dir.isCache {
-			label = fmt.Sprintf("Cache: %s, Age: %s, Size: %.2f %s. Would you like to remove", dir.workspaceName, dir.accessTime, dir.hRSize, dir.unit)
-		}
-		prompt := &promptui.Prompt{
-			Label:     label,
-			IsConfirm: true,
-		}
-		_, promptErr := prompt.Run()
-
-		if promptErr == nil {
-			fmt.Printf("%s added to the delete queue\n", dir.workspaceName)
-			c.manipulateDeleteCounter(1)
-			c.deleteChannel <- dir.path
-			spaceReclaimed = spaceReclaimed + dir.size
-		}
-
-		c.bazelDirsMutex.Lock()
-		bazelDir := c.bazelDirs[dir.path]
-		bazelDir.userAsked = true
-		c.bazelDirs[dir.path] = bazelDir
-		c.bazelDirsMutex.Unlock()
-
-		// we dont want to ask the user if they want to continue on the last item
-		if i < len(c.bazelDirs)-1 {
-			_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
-			prompt2 := &promptui.Prompt{
-				Label:     fmt.Sprintf("Space reclaimed: %.2f %s. Would you like to continue", hRSpaceReclaimed, unit),
-				IsConfirm: true,
-			}
-			_, promptErr = prompt2.Run()
-			if promptErr != nil {
-				break
-			}
-		}
-	}
-
-	// Holding function. Will recursively print and sleep until all deletes have completed
-	c.waitForDeletes()
-
-	_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
-	fmt.Printf("Disk Space Gained: %.2f %s. Exiting...\n", hRSpaceReclaimed, unit)
-
-	// close all the channels
-	close(c.sizeCalcChannel)
-	close(c.deleteChannel)
-	close(c.errorChannel)
-
-	if c.chanErrors.size > 0 {
-		return c.chanErrors.generateError()
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("failed to reclaim all: %w", err)
 	}
 
 	return nil
 }
 
-func (c *Clean) findDiskCaches() {
+func (c *Clean) confirmationActor(
+	ctx context.Context,
+	directories <-chan bazelDirInfo,
+	deleteQueue chan<- string,
+) error {
+	for bazelDir := range directories {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+
+		// TODO: Delete?
+		// processedBazelWorkspaceDirectories := c.getProcessedBazelWorkspaceDirectories()
+		// Waiting function. Will only return once there is at least 1 directory that
+		// we can prompt the user about. Will inform the user that we are waiting
+		// dir := processedBazelWorkspaceDirectories[0]
+
+		var label string
+		if bazelDir.isCache {
+			label = fmt.Sprintf("Cache: %s, Age: %s, Size: %.2f %s. Would you like to remove?", bazelDir.workspaceName, bazelDir.accessTime, bazelDir.hRSize, bazelDir.unit)
+		} else {
+			label = fmt.Sprintf("Workspace: %s, Age: %s, Size: %.2f %s. Would you like to remove?", bazelDir.workspaceName, bazelDir.accessTime, bazelDir.hRSize, bazelDir.unit)
+		}
+		promptRemove := &promptui.Prompt{
+			Label:     label,
+			IsConfirm: true,
+		}
+		if _, err := promptRemove.Run(); err == nil {
+			fmt.Printf("%s added to the delete queue\n", bazelDir.workspaceName)
+			deleteQueue <- bazelDir.path
+		}
+
+		bazelDir.userAsked = true
+
+		promptContinue := &promptui.Prompt{
+			Label:     "Would you like to continue?",
+			IsConfirm: true,
+		}
+		if _, err := promptContinue.Run(); err != nil {
+			break
+		}
+	}
+	return nil
+}
+
+func (c *Clean) findDiskCaches(
+	ctx context.Context,
+	sizeCalcQueue chan<- bazelDirInfo,
+) error {
 	tempDir, err := ioutil.TempDir("", "tmp_bazel_output")
 	if err != nil {
-		c.errorChannel <- fmt.Errorf("failed to create tmp dir: %w", err)
-		return
+		return fmt.Errorf("failed to find disk caches: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	bepLocation := tempDir + "/bep.json"
+	bepLocation := filepath.Join(tempDir, "bep.json")
 
-	r, w := io.Pipe()
-	decoder := base64.NewDecoder(base64.StdEncoding, r)
 	go func() {
-		defer w.Close()
-
 		// Running an invalid query should ensure that repository rules are not executed.
 		// However, bazel will still emit its BEP containing the flag that we are interested in.
 		// This will ensure it returns quickly and allows us to easily access said flag.
@@ -323,15 +318,12 @@ func (c *Clean) findDiskCaches() {
 			// We are only interested in the BEP output
 			"--ui_event_filters=-fatal,-error,-warning,-info,-progress,-debug,-start,-finish,-subcommand,-stdout,-stderr,-pass,-fail,-timeout,-cancelled,-depchecker",
 			"--noshow_progress",
-		}, w)
+		}, io.Discard)
 	}()
-
-	ioutil.ReadAll(decoder)
 
 	file, err := os.Open(bepLocation)
 	if err != nil {
-		c.errorChannel <- fmt.Errorf("failed to read file: %w", err)
-		return
+		return fmt.Errorf("failed to find disk caches: %w", err)
 	}
 	defer file.Close()
 
@@ -349,53 +341,53 @@ func (c *Clean) findDiskCaches() {
 					isCache:            true,
 				}
 				fileStat, err := os.Stat(cachePath)
-
 				if err != nil {
-					c.errorChannel <- fmt.Errorf("failed to stat cache folder: %w", err)
-					return
+					return fmt.Errorf("failed to find disk caches: %w", err)
 				}
 
 				cacheInfo.accessTime = c.GetAccessTime(fileStat)
 				cacheInfo.workspaceName = cachePath
 
-				c.bazelDirsMutex.Lock()
-				c.bazelDirs[cachePath] = cacheInfo
-				c.bazelDirsMutex.Unlock()
-				c.sizeCalcChannel <- cacheInfo
+				if err := ctx.Err(); err != nil {
+					return nil
+				}
+				sizeCalcQueue <- cacheInfo
 			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		c.errorChannel <- fmt.Errorf("failed to read file: %w", err)
-		return
+		return fmt.Errorf("failed to find disk caches: %w", err)
 	}
+
+	return nil
 }
 
-func (c *Clean) findBazelWorkspaces() {
+func (c *Clean) findBazelWorkspaces(
+	ctx context.Context,
+	sizeCalcQueue chan<- bazelDirInfo,
+) error {
 	bazelBaseDir, currentWorkingBase, err := c.findBazelBaseDir()
 	if err != nil {
-		c.errorChannel <- fmt.Errorf("failed to find bazel working dir: %w", err)
-		return
+		return fmt.Errorf("failed to find bazel worksapces: %w", err)
 	}
 
 	bazelWorkspaces, err := ioutil.ReadDir(bazelBaseDir)
 	if err != nil {
-		c.errorChannel <- fmt.Errorf("failed to find bazel worksapces: %w", err)
-		return
+		return fmt.Errorf("failed to find bazel worksapces: %w", err)
 	}
 
 	// find bazel workspaces and start processing
 	for _, workspace := range bazelWorkspaces {
 		workspaceInfo := bazelDirInfo{
-			path:               bazelBaseDir + "/" + workspace.Name(),
+			path:               filepath.Join(bazelBaseDir, workspace.Name()),
 			isCurrentWorkspace: workspace.Name() == currentWorkingBase,
 			isCache:            false,
 		}
 
 		workspaceInfo.accessTime = c.GetAccessTime(workspace)
 
-		execrootFiles, readDirErr := ioutil.ReadDir(bazelBaseDir + "/" + workspace.Name() + "/execroot")
+		execrootFiles, readDirErr := ioutil.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
 		if readDirErr != nil {
 			// install and cache folders will end up here. Currently we dont want to remove these
 			continue
@@ -417,51 +409,57 @@ func (c *Clean) findBazelWorkspaces() {
 			}
 		}
 
-		c.bazelDirsMutex.Lock()
-		c.bazelDirs[workspaceInfo.path] = workspaceInfo
-		c.bazelDirsMutex.Unlock()
-
-		c.sizeCalcChannel <- workspaceInfo
-	}
-}
-
-func (c *Clean) manipulateDeleteCounter(increment int) {
-	c.deleteMutex.Lock()
-	c.deleteCounter = c.deleteCounter + increment
-	c.deleteMutex.Unlock()
-}
-
-func (c *Clean) waitForDeletes() {
-	c.waitForDeletesInternal(true)
-}
-
-func (c *Clean) waitForDeletesInternal(firstCall bool) {
-	c.deleteMutex.Lock()
-	counterSize := c.deleteCounter
-	c.deleteMutex.Unlock()
-
-	if counterSize > 0 {
-		// we need to wait
-		if firstCall {
-			fmt.Print("Waiting for delete's to complete")
-		} else {
-			fmt.Print(".")
+		if err := ctx.Err(); err != nil {
+			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
-		c.waitForDeletesInternal(false)
-		if firstCall {
-			fmt.Println("")
-		}
+		sizeCalcQueue <- workspaceInfo
 	}
+
+	return nil
 }
 
-func (c *Clean) directoryProcessor() {
-	for dir := range c.sizeCalcChannel {
-		size, hRSize, unit := c.getDirSize(dir.path)
+// func (c *Clean) manipulateDeleteCounter(increment int) {
+// 	c.deleteMutex.Lock()
+// 	c.deleteCounter = c.deleteCounter + increment
+// 	c.deleteMutex.Unlock()
+// }
 
-		c.bazelDirsMutex.Lock()
+// func (c *Clean) waitForDeletes() {
+// 	c.waitForDeletesInternal(true)
+// }
 
-		bazelDir := c.bazelDirs[dir.path]
+// func (c *Clean) waitForDeletesInternal(firstCall bool) {
+// 	c.deleteMutex.Lock()
+// 	counterSize := c.deleteCounter
+// 	c.deleteMutex.Unlock()
+
+// 	if counterSize > 0 {
+// 		// we need to wait
+// 		if firstCall {
+// 			fmt.Print("Waiting for delete's to complete")
+// 		} else {
+// 			fmt.Print(".")
+// 		}
+// 		time.Sleep(100 * time.Millisecond)
+// 		c.waitForDeletesInternal(false)
+// 		if firstCall {
+// 			fmt.Println("")
+// 		}
+// 	}
+// }
+
+func (c *Clean) sizeCalculator(
+	ctx context.Context,
+	in <-chan bazelDirInfo,
+	out chan<- bazelDirInfo,
+) error {
+	for bazelDir := range in {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+
+		size, hRSize, unit := c.getDirSize(bazelDir.path)
+
 		bazelDir.size = size
 		bazelDir.hRSize = hRSize
 		bazelDir.unit = unit
@@ -477,82 +475,80 @@ func (c *Clean) directoryProcessor() {
 		}
 
 		bazelDir.comparator = comparator
-		c.bazelDirs[dir.path] = bazelDir
-
-		c.bazelDirsMutex.Unlock()
+		out <- bazelDir
 	}
+	return nil
 }
 
-func (c *Clean) deleteProcessor() {
-	for dir := range c.deleteChannel {
+func (c *Clean) deleteProcessor(
+	ctx context.Context,
+	deleteQueue chan string,
+) error {
+	for dir := range deleteQueue {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
 
 		// We know that there will be an "external" folder that could be deleted in parallel.
 		// So we can move those folders to a tmp filepath and add them as seperate deletes that will
 		// therefore happen in parallel.
-		externalFolders, _ := ioutil.ReadDir(dir + "/external")
+		externalFolders, _ := ioutil.ReadDir(filepath.Join(dir, "external"))
 		for _, folder := range externalFolders {
 			newPath := c.MoveFolderToTmp(dir, folder.Name())
-
 			if newPath != "" {
 				c.manipulateDeleteCounter(1)
-				c.deleteChannel <- newPath
+				deleteQueue <- newPath
 			}
 		}
 
 		// otherwise certain files will throw a permission error when we try to remove them
-		_, err := c.ChangeFolderPermissions(dir)
-		if err != nil {
-			c.errorChannel <- fmt.Errorf("failed to chmod on %s: %w", dir, err)
-			c.manipulateDeleteCounter(-1)
-			continue
+		if _, err := c.ChangeFolderPermissions(dir); err != nil {
+			return fmt.Errorf("failed to delete %q: %w", dir, err)
 		}
 
 		// remove entire folder
-		err = os.RemoveAll(dir)
-		if err != nil {
-			c.errorChannel <- fmt.Errorf("failed to delete %s: %w", dir, err)
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("failed to delete %q: %w", dir, err)
 		}
+		spaceReclaimed = spaceReclaimed + bazelDir.size
+		_, hRSpaceReclaimed, unit := c.makeBytesHumanReadable(spaceReclaimed)
+		fmt.Printf("Space reclaimed: %.2f%s\n", hRSpaceReclaimed, unit)
 		c.manipulateDeleteCounter(-1)
 	}
-}
-
-func (c *Clean) errorProcessor() {
-	for err := range c.errorChannel {
-		c.chanErrors.insert(err)
-	}
+	return nil
 }
 
 func (c *Clean) findBazelBaseDir() (string, string, error) {
-	var bazelOutputBase, currentWorkingBase string
-
 	cwd, err := os.Getwd()
-
 	if err != nil {
-		return bazelOutputBase, currentWorkingBase, err
+		return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
 	}
 
 	files, err := ioutil.ReadDir(cwd)
 	if err != nil {
-		return bazelOutputBase, currentWorkingBase, err
+		return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
 	}
 
 	for _, file := range files {
-
 		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate non-symlinks immediately
 		if file.Mode()&os.ModeSymlink != 0 {
-			actualPath, _ := os.Readlink(cwd + "/" + file.Name())
+			actualPath, err := os.Readlink(filepath.Join(cwd, file.Name()))
+			if err != nil {
+				return "", "", fmt.Errorf("failed to find Bazel base dir: %w", err)
+			}
 
 			if strings.Contains(actualPath, "bazel") && strings.Contains(actualPath, "/execroot/") {
 				execrootBase := strings.Split(actualPath, "/execroot/")[0]
 				execrootSplit := strings.Split(execrootBase, "/")
-				currentWorkingBase = execrootSplit[len(execrootSplit)-1]
-				bazelOutputBase = strings.Join(execrootSplit[:len(execrootSplit)-1], "/")
-				break
+				currentWorkingBase := execrootSplit[len(execrootSplit)-1]
+				bazelOutputBase := strings.Join(execrootSplit[:len(execrootSplit)-1], "/")
+				return bazelOutputBase, currentWorkingBase, nil
 			}
 		}
 	}
 
-	return bazelOutputBase, currentWorkingBase, err
+	// TODO: what message?
+	return "", "", fmt.Errorf("failed to find Bazel base dir: ?????")
 }
 
 func (c *Clean) getProcessedBazelWorkspaceDirectories() []bazelDirInfo {
