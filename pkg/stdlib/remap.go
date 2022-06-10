@@ -9,6 +9,7 @@
 package stdlib
 
 import (
+	"io"
 	"io/fs"
 	"net"
 )
@@ -17,3 +18,5 @@ type FSFileInfo = fs.FileInfo
 
 type NetAddr = net.Addr
 type NetListener = net.Listener
+
+type IOReadCloser = io.ReadCloser

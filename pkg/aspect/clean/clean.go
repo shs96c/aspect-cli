@@ -9,9 +9,10 @@
 package clean
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -80,6 +81,30 @@ type bazelDirInfo struct {
 	isCache            bool
 }
 
+func osOpen(name string) (io.ReadCloser, error) {
+	return os.Open(name)
+}
+
+func osReadFile(name string) ([]byte, error) {
+	return os.ReadFile(name)
+}
+
+func osReadlink(name string) (string, error) {
+	return os.Readlink(name)
+}
+
+func tempDir(dir string, pattern string) (string, error) {
+	return ioutil.TempDir(dir, pattern)
+}
+
+func readDir(dirname string) ([]fs.FileInfo, error) {
+	return ioutil.ReadDir(dirname)
+}
+
+func getwd() (string, error) {
+	return os.Getwd()
+}
+
 // Clean represents the aspect clean command.
 type Clean struct {
 	ioutils.Streams
@@ -93,6 +118,14 @@ type Clean struct {
 
 	Expunge      bool
 	ExpungeAsync bool
+
+	// osOpen func(name string) (io.ReadWriteCloser, error)
+	OsOpen     func(name string) (io.ReadCloser, error)
+	OsReadFile func(name string) ([]byte, error)
+	OsReadlink func(name string) (string, error)
+	TempDir    func(dir string, pattern string) (string, error)
+	ReadDir    func(dirname string) ([]fs.FileInfo, error)
+	Getwd      func() (string, error)
 }
 
 // New creates a Clean command.
@@ -131,6 +164,12 @@ func NewDefault(streams ioutils.Streams, bzl bazel.Bazel, isInteractive bool) *C
 		IsConfirm: true,
 	}
 	c.Prefs = *viper.GetViper()
+	c.OsOpen = osOpen
+	c.OsReadFile = osReadFile
+	c.OsReadlink = osReadlink
+	c.TempDir = tempDir
+	c.ReadDir = readDir
+	c.Getwd = getwd
 	return c
 }
 
@@ -314,7 +353,7 @@ func (c *Clean) findDiskCaches(
 	sizeCalcQueue chan<- bazelDirInfo,
 	errors chan<- error,
 ) {
-	tempDir, err := ioutil.TempDir("", "tmp_bazel_output")
+	tempDir, err := c.TempDir("", "tmp_bazel_output")
 	if err != nil {
 		errors <- fmt.Errorf("failed to find disk caches: failed to create tmp dir: %w", err)
 		return
@@ -328,6 +367,8 @@ func (c *Clean) findDiskCaches(
 		Stdout: nil,
 		Stderr: nil,
 	}
+
+	fmt.Println("Here1")
 
 	// Running an invalid query should ensure that repository rules are not executed.
 	// However, bazel will still emit its BEP containing the flag that we are interested in.
@@ -343,18 +384,28 @@ func (c *Clean) findDiskCaches(
 		"--noshow_progress",
 	}, streams)
 
-	file, err := os.Open(bepLocation)
-	if err != nil {
-		errors <- fmt.Errorf("failed to find disk caches: failed to open BEP file: %w", err)
-		return
-	}
-	defer file.Close()
+	fmt.Println("Here2")
+	// file, err := os.Open(bepLocation)
+	// file, err := c.OsOpen(bepLocation)
+	// if err != nil {
+	// 	errors <- fmt.Errorf("failed to find disk caches: failed to open BEP file: %w", err)
+	// 	return
+	// }
+	// defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		text := scanner.Text()
-		if strings.Contains(text, unstructuredArgsBEPKey) {
-			result := diskCacheRegex.FindAllStringSubmatch(text, -1)
+	fmt.Println("Here3")
+
+	rawBEP, _ := c.OsReadFile(bepLocation)
+	bepStrings := strings.Split(strings.ReplaceAll(string(rawBEP), "\r\n", "\n"), "\n")
+
+	for _, bepString := range bepStrings {
+		fmt.Println("----------------------------------")
+		fmt.Println(bepString)
+		fmt.Println(bepString)
+		fmt.Println(bepString)
+		fmt.Println("----------------------------------")
+		if strings.Contains(bepString, unstructuredArgsBEPKey) {
+			result := diskCacheRegex.FindAllStringSubmatch(bepString, -1)
 			for i := range result {
 				cachePath := result[i][1]
 
@@ -377,44 +428,51 @@ func (c *Clean) findDiskCaches(
 			}
 		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		errors <- fmt.Errorf("failed to find disk caches: failed to read BEP file: %w", err)
-		return
-	}
 }
 
 func (c *Clean) findBazelWorkspaces(
 	sizeCalcQueue chan<- bazelDirInfo,
 	errors chan<- error,
 ) {
+	fmt.Println("findBazelWorkspaces1")
 	bazelBaseDir, currentWorkingBase, err := c.findBazelBaseDir()
 	if err != nil {
 		errors <- fmt.Errorf("failed to find bazel workspaces: failed to find bazel base directory: %w", err)
 		return
 	}
 
-	bazelWorkspaces, err := ioutil.ReadDir(bazelBaseDir)
+	fmt.Println("findBazelWorkspaces2")
+	bazelWorkspaces, err := c.ReadDir(bazelBaseDir)
 	if err != nil {
 		errors <- fmt.Errorf("failed to find bazel workspaces: failed to read bazel base directory: %w", err)
 		return
 	}
 
+	fmt.Println("findBazelWorkspaces3")
 	// Find bazel workspaces and start processing.
 	for _, workspace := range bazelWorkspaces {
+		fmt.Println("findBazelWorkspaces4")
+		fmt.Println(workspace.Name())
 		workspaceInfo := bazelDirInfo{
 			path:               filepath.Join(bazelBaseDir, workspace.Name()),
 			isCurrentWorkspace: workspace.Name() == currentWorkingBase,
 			isCache:            false,
 		}
+		fmt.Println("findBazelWorkspaces5")
+
+		// workspace.Sys()
 
 		workspaceInfo.accessTime = c.GetAccessTime(workspace)
 
-		execrootFiles, readDirErr := ioutil.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
+		fmt.Println("findBazelWorkspaces6")
+		fmt.Println(workspaceInfo.accessTime)
+
+		execrootFiles, readDirErr := c.ReadDir(filepath.Join(bazelBaseDir, workspace.Name(), "execroot"))
 		if readDirErr != nil {
 			// The install and cache directories will end up here.We must not remove these
 			continue
 		}
+		fmt.Println("findBazelWorkspaces7")
 
 		// We expect these directories to have up to 2 files / directories:
 		//   - Firstly, a file named "DO_NOT_BUILD_HERE".
@@ -425,14 +483,19 @@ func (c *Clean) findBazelWorkspaces(
 			// TODO: Only ask the user if they want to remove unknown workspace once.
 			// https://github.com/aspect-build/aspect-cli/issues/208
 			workspaceInfo.workspaceName = "Unknown Workspace"
+			fmt.Println("findBazelWorkspaces7")
 		} else {
+			fmt.Println("findBazelWorkspaces8")
 			for _, execrootFile := range execrootFiles {
+				fmt.Println("findBazelWorkspaces9")
 				if execrootFile.Name() != "DO_NOT_BUILD_HERE" {
+					fmt.Println("findBazelWorkspaces10")
 					workspaceInfo.workspaceName = execrootFile.Name()
 				}
 			}
 		}
 
+		fmt.Println("findBazelWorkspaces11")
 		sizeCalcQueue <- workspaceInfo
 	}
 }
@@ -480,7 +543,7 @@ func (c *Clean) deleteProcessor(
 		// We know that there will be an "external" directory that could be deleted in parallel.
 		// So we can move those directories to a tmp filepath and add them as seperate deletes that will
 		// therefore happen in parallel.
-		externalDirectories, _ := ioutil.ReadDir(filepath.Join(bazelDir.path, "external"))
+		externalDirectories, _ := c.ReadDir(filepath.Join(bazelDir.path, "external"))
 		for _, directory := range externalDirectories {
 			newPath := c.MoveDirectoryToTmp(bazelDir.path, directory.Name())
 
@@ -542,24 +605,55 @@ func (c *Clean) sizePrinter(sizeQueue <-chan float64, waitGroup *sync.WaitGroup)
 }
 
 func (c *Clean) findBazelBaseDir() (string, string, error) {
-	cwd, err := os.Getwd()
+	cwd, err := c.Getwd()
 	if err != nil {
 		return "", "", fmt.Errorf("failed to find Bazel base directory: failed to get current working directory: %w", err)
 	}
 
-	files, err := ioutil.ReadDir(cwd)
+	files, err := c.ReadDir(cwd)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to find Bazel base directory: failed to read current working directory %w", err)
 	}
 
+	fmt.Println("findBazelBaseDir")
+	fmt.Println(files)
 	for _, file := range files {
+
+		fmt.Println("---------------------------------------------")
+		fmt.Println("file.Name()")
+		// fmt.Println("file.Name()")
+		fmt.Println(file.Name())
+		// fmt.Println(file.Name())
+		// fmt.Println("file.Mode()")
+		// fmt.Println("file.Mode()")
+		// fmt.Println(file.Mode())
+		// fmt.Println(file.Mode())
+		// fmt.Printf("%v\n", file.Mode())
+		// fmt.Println("os.ModeSymlink")
+		// fmt.Println("os.ModeSymlink")
+		// fmt.Println(os.ModeSymlink)
+		// fmt.Println(os.ModeSymlink)
+		// fmt.Println("file.Mode()&os.ModeSymlink")
+		// fmt.Println("file.Mode()&os.ModeSymlink")
+		// fmt.Println(file.Mode() & os.ModeSymlink)
+		// fmt.Println(file.Mode() & os.ModeSymlink)
+
+		// mode := int(0777)
+		// // os.FileMode(mode)
+		// fmt.Println(os.FileMode(mode) & os.ModeSymlink)
+		// fmt.Println(os.ModeSymlink & os.ModeSymlink)
+
+		fmt.Println("Outside the check")
 
 		// bazel-bin, bazel-out, etc... will be symlinks, so we can eliminate non-symlinks immediately.
 		if file.Mode()&os.ModeSymlink != 0 {
-			actualPath, err := os.Readlink(filepath.Join(cwd, file.Name()))
+			fmt.Println("Inside the check")
+			actualPath, err := c.OsReadlink(filepath.Join(cwd, file.Name()))
 			if err != nil {
 				return "", "", fmt.Errorf("failed to find Bazel base directory: failed to follow symlink: %w", err)
 			}
+
+			fmt.Println(actualPath)
 
 			normalizedPath := filepath.ToSlash(actualPath)
 			if strings.Contains(normalizedPath, "bazel") && strings.Contains(normalizedPath, "/execroot/") {
@@ -567,11 +661,14 @@ func (c *Clean) findBazelBaseDir() (string, string, error) {
 				execrootSplit := strings.Split(execrootBase, "/")
 				currentWorkingBase := execrootSplit[len(execrootSplit)-1]
 				bazelOutputBase := strings.Join(execrootSplit[:len(execrootSplit)-1], "/")
+				fmt.Println("Returning from findBazelBaseDir")
+				fmt.Println(bazelOutputBase, currentWorkingBase, nil)
 				return bazelOutputBase, currentWorkingBase, nil
 			}
 		}
 	}
 
+	fmt.Println("Going to fail!!!!")
 	return "", "", fmt.Errorf("failed to find Bazel base directory: bazel output symlinks not found in directory")
 }
 

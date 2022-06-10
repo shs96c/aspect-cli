@@ -8,6 +8,7 @@ gomock(
     out = "mock_stdlib_test.go",
     interfaces = [
         "FSFileInfo",
+        "IOReadCloser",
         "NetAddr",
         "NetListener",
     ],

@@ -12,7 +12,6 @@ package clean
 
 import (
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,7 +41,7 @@ func (c *Clean) GetAccessTime(workspace fs.FileInfo) time.Duration {
 }
 
 func (c *Clean) MoveDirectoryToTmp(dir string, name string) string {
-	tempDir, err := ioutil.TempDir("", "aspect_delete")
+	tempDir, err := c.TempDir("", "aspect_delete")
 	if err != nil {
 		return ""
 	}

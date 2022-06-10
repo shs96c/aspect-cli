@@ -10,9 +10,12 @@ package clean_test
 
 import (
 	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -22,6 +25,7 @@ import (
 	"aspect.build/cli/pkg/aspect/clean"
 	"aspect.build/cli/pkg/bazel/mock"
 	"aspect.build/cli/pkg/ioutils"
+	stdlib_mock "aspect.build/cli/pkg/stdlib/mock"
 )
 
 type confirm struct{}
@@ -42,6 +46,12 @@ func (p chooseReclaim) Run() (int, string, error) {
 	return 0, clean.ReclaimOption, nil
 }
 
+type chooseReclaimAllOption struct{}
+
+func (p chooseReclaimAllOption) Run() (int, string, error) {
+	return 1, clean.ReclaimAllOption, nil
+}
+
 type chooseNonIncremental struct{}
 
 func (p chooseNonIncremental) Run() (int, string, error) {
@@ -58,6 +68,18 @@ type chooseWorkaround struct{}
 
 func (p chooseWorkaround) Run() (int, string, error) {
 	return 4, clean.WorkaroundOption, nil
+}
+
+type fakeSysInfo struct {
+	// Darwin
+	Atimespec syscall.Timespec
+	Ctimespec syscall.Timespec
+	Mtimespec syscall.Timespec
+
+	// Linux
+	Atim syscall.Timespec
+	Ctim syscall.Timespec
+	Mtim syscall.Timespec
 }
 
 func TestClean(t *testing.T) {
@@ -207,6 +229,169 @@ func TestClean(t *testing.T) {
 		c := clean.New(streams, bzl, true)
 		c.Behavior = chooseWorkaround{}
 		c.Workaround = confirm{}
+		g.Expect(c.Run(nil, []string{})).Should(Succeed())
+		g.Expect(stdout.String()).To(ContainSubstring("recommend you file a bug"))
+	})
+
+	t.Run("initial run through", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		tempDir, tempDirErr := ioutil.TempDir("", "tmp_bazel_output")
+
+		bzl := mock.NewMockBazel(ctrl)
+		bzl.
+			EXPECT().
+			RunCommand(
+				[]string{
+					"query",
+					"//",
+					"--build_event_json_file=" + filepath.Join(tempDir, "bep.json"),
+					"--ui_event_filters=-fatal,-error,-warning,-info,-progress,-debug,-start,-finish,-subcommand,-stdout,-stderr,-pass,-fail,-timeout,-cancelled,-depchecker",
+					"--noshow_progress",
+				},
+				ioutils.Streams{
+					Stdin:  nil,
+					Stdout: nil,
+					Stderr: nil,
+				},
+			).
+			Return(0, nil)
+
+		var stdout strings.Builder
+		streams := ioutils.Streams{Stdout: &stdout}
+
+		c := clean.New(streams, bzl, true)
+		c.Behavior = chooseReclaimAllOption{}
+		c.Workaround = confirm{}
+
+		testTempDir := func(dir string, pattern string) (string, error) {
+			return tempDir, tempDirErr
+		}
+		c.TempDir = testTempDir
+
+		c.OsReadFile = func(name string) ([]byte, error) {
+			fmt.Println("I am here")
+			return []byte("testing 123"), nil
+		}
+
+		fsFileInfo := stdlib_mock.NewMockFSFileInfo(ctrl)
+		fsFileInfo_findBazelBaseDir := stdlib_mock.NewMockFSFileInfo(ctrl)
+		fakeWD := "/fake/wd"
+		c.ReadDir = func(dirname string) ([]fs.FileInfo, error) {
+			fmt.Println(dirname)
+			fmt.Println(dirname)
+			fmt.Println(dirname)
+			fmt.Println(dirname)
+			if dirname == fakeWD {
+				return []fs.FileInfo{fsFileInfo_findBazelBaseDir}, nil
+			}
+
+			return []fs.FileInfo{fsFileInfo}, nil
+		}
+
+		c.OsReadlink = func(name string) (string, error) {
+			fmt.Println("In the fake OsReadlink")
+			return "/fake/bazel/execroot/for/testing", nil
+		}
+
+		c.Getwd = func() (string, error) {
+			return fakeWD, nil
+		}
+
+		// fsFileInfo.EXPECT().
+		// 	IsDir().
+		// 	Return(false).
+		// 	Times(1)
+
+		// var buffer bytes.Buffer
+		// buffer.WriteString("fake, csv, data")
+
+		// fmt.Println([]byte{102, 97, 107, 101, 44, 32, 99, 115, 118, 44, 32, 100, 97, 116, 97})
+		// for i := 0; i < 4096; i++ {
+		// 	buffer.WriteByte(0)
+		// }
+
+		// fmt.Println(buffer.Bytes())
+
+		// iOReadCloser := stdlib_mock.NewMockIOReadCloser(ctrl)
+
+		// sysInfo := fakeSysInfo{
+		// 	Atimespec: syscall.Timespec{
+		// 		Sec:  100000,
+		// 		Nsec: 0,
+		// 	},
+		// }
+
+		// alternateSysInfo := syscall.Stat_t(sysInfo)
+		alternateSysInfo := syscall.Stat_t{
+			Atimespec: syscall.Timespec{
+				Sec:  100000,
+				Nsec: 0,
+			},
+			Mtimespec: syscall.Timespec{
+				Sec:  100000,
+				Nsec: 0,
+			},
+			Ctimespec: syscall.Timespec{
+				Sec:  100000,
+				Nsec: 0,
+			},
+		}
+
+		gomock.InOrder(
+			// iOReadCloser.EXPECT().
+			// 	Read([]byte{102, 97, 107, 101, 44, 32, 99, 115, 118, 44, 32, 100, 97, 116, 97}).
+			// 	Return(0, nil).
+			// 	Times(1),
+			fsFileInfo.EXPECT().
+				Name().
+				Return("testName1").
+				Times(3),
+			fsFileInfo.EXPECT().
+				Sys().
+				Return(&alternateSysInfo).
+				Times(3),
+			fsFileInfo.EXPECT().
+				Name().
+				Return("testName1").
+				Times(2),
+			fsFileInfo.EXPECT().
+				Mode().
+				Return(os.ModeSymlink).
+				Times(1),
+			// fsFileInfo.EXPECT().
+			// 	Close().
+			// 	Return(nil).
+			// 	Times(1),
+		)
+
+		// mode := int(0777)
+		// os.FileMode(mode)
+		// fmt.Println(os.FileMode(mode) & os.ModeSymlink)
+		// fmt.Println(os.ModeSymlink & os.ModeSymlink)
+		gomock.InOrder(
+			fsFileInfo_findBazelBaseDir.EXPECT().
+				Name().
+				Return("testName2").
+				Times(1),
+			fsFileInfo_findBazelBaseDir.EXPECT().
+				Mode().
+				Return(os.ModeSymlink).
+				Times(1),
+			fsFileInfo_findBazelBaseDir.EXPECT().
+				Name().
+				Return("testName2").
+				Times(1),
+		)
+
+		// c.OsOpen = func(name string) (io.ReadCloser, error) {
+		// 	return iOReadCloser, nil
+		// }
+
+		fmt.Println("here22222")
+
 		g.Expect(c.Run(nil, []string{})).Should(Succeed())
 		g.Expect(stdout.String()).To(ContainSubstring("recommend you file a bug"))
 	})
